@@ -2,6 +2,7 @@ import os
 import logging
 import textwrap
 import io
+import time
 from threading import Thread
 from flask import Flask
 from telegram import Update
@@ -19,15 +20,23 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# --- 3. GEMINI AI SETUP ---
+# --- 3. GEMINI AI SETUP & SAFETY ---
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
-    # Model name updated to avoid 404 error
+    # Model name fix: 'gemini-1.5-flash-latest' sabse stable hai abhi
     model = genai.GenerativeModel('gemini-1.5-flash-latest')
 else:
-    logging.error("⚠️ GOOGLE_API_KEY nahi mila! Render Environment Variables check karein.")
+    logging.error("⚠️ GOOGLE_API_KEY Missing! Render settings check karo.")
 
-# --- 4. FLASK SERVER (For Render Keep-Alive) ---
+# Safety Settings: Taaki 'Samajh nahi aaya' wala error na aaye
+SAFETY_SETTINGS = [
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+]
+
+# --- 4. FLASK SERVER (Render Alive Rakhne Ke Liye) ---
 app = Flask('')
 
 @app.route('/')
@@ -48,12 +57,13 @@ def text_to_handwriting_image(text):
     line_spacing = 10
     margin = 50
     
+    # Font Loader
     try:
         font = ImageFont.truetype("handwriting.ttf", font_size)
     except IOError:
         font = ImageFont.load_default()
     
-    # Calculate layout
+    # Text Wrapping logic
     chars_per_line = int((width - 2 * margin) / (font_size * 0.6))
     wrapper = textwrap.TextWrapper(width=chars_per_line)
     
@@ -65,7 +75,6 @@ def text_to_handwriting_image(text):
     total_text_height = len(lines) * (font_size + line_spacing)
     height = max(1000, total_text_height + 2 * margin)
 
-    # Create Image
     image = Image.new('RGB', (width, height), color=(255, 255, 255))
     draw = ImageDraw.Draw(image)
     y_text = margin
@@ -80,15 +89,13 @@ def text_to_handwriting_image(text):
     bio.seek(0)
     return bio
 
-# --- 6. BOT LOGIC ---
+# --- 6. MAIN BOT LOGIC ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Aur Bhai! JEE ki taiyari kaisi chal rahi hai?\n"
-        "Mujhe koi bhi question bhejo (Photo ya Text), main solve karke dunga.\n"
-        "Baki gapp-shapp bhi kar sakte ho!"
+        "Question bhejo (Photo ya Text), main solve karke dunga.\n"
+        "Handwritten notes ki tarah answer milega! 📝"
     )
-
-# --- UPDATE THIS FUNCTION IN YOUR CODE ---
 
 async def solve_doubt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not GOOGLE_API_KEY:
@@ -98,89 +105,85 @@ async def solve_doubt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_msg = update.message.text
     user_name = update.effective_user.first_name
     
-    # ... (Is_Doubt logic same rahega) ...
-    # Agar message me keywords hain ya photo hai to 'is_doubt = True'
+    # === DECISION: Doubt hai ya Chat? ===
+    is_doubt = False
+    if update.message.photo:
+        is_doubt = True 
+    elif user_msg:
+        keywords = ['solve', 'doubt', 'explain', 'question', 'math', 'physics', 'chemistry', 'answer', 'integration', 'derivative', 'reaction']
+        if any(word in user_msg.lower() for word in keywords) or len(user_msg.split()) > 5:
+            is_doubt = True
 
-    # === Logic for Doubts ===
-    # Yahan humne Safety Settings add ki hain taaki block na ho
-    safety_settings = [
-        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-    ]
-
+    # === EXECUTION ===
     if is_doubt:
+        # --- DOUBT MODE ---
         waiting_msg = await update.message.reply_text(f"Ruk {user_name}, solve kar raha hu... ✍️")
         
         try:
-            # TEACHER PROMPT (Thoda aur strong banaya hai)
             system_prompt = (
-                "You are an expert JEE Tutor. Your task is to solve physics/math/chemistry problems. "
-                "Analyze the image or text carefully. "
-                "Provide a step-by-step solution in simple Hinglish/English. "
-                "Do NOT use complex LaTeX. Write as if writing in a notebook."
+                "You are an expert JEE Tutor. Solve this problem step-by-step. "
+                "Write in plain Hinglish/English. "
+                "Do NOT use complex LaTeX. Write like a student notebook."
             )
 
-            response = None
-
-            # CASE 1: Photo
+            # Generate Content
             if update.message.photo:
                 photo_file = await update.message.photo[-1].get_file()
                 image_bytes = await photo_file.download_as_bytearray()
                 user_image = Image.open(io.BytesIO(image_bytes))
-                caption = update.message.caption if update.message.caption else "Solve this question detailed."
+                caption = update.message.caption if update.message.caption else "Solve this"
                 
-                # Image ke liye 'gemini-1.5-flash' use karein (Flash models vision ke liye fast hote hain)
-                # Note: 'stream=False' zaroori hai
                 response = model.generate_content(
                     [system_prompt, caption, user_image],
-                    safety_settings=safety_settings
+                    safety_settings=SAFETY_SETTINGS
                 )
-
-            # CASE 2: Text
             else:
                 response = model.generate_content(
                     f"{system_prompt}\n\nQuestion: {user_msg}",
-                    safety_settings=safety_settings
+                    safety_settings=SAFETY_SETTINGS
                 )
-            
-            # Response Check
-            if not response.text:
-                raise ValueError("Empty response from AI")
 
-            # Image Conversion
+            # Check for empty response
+            if not response.text:
+                await waiting_msg.edit_text("Yaar answer generate nahi hua. Dobara bhejo.")
+                return
+
+            # Convert to Handwriting Image
             img_bytes = text_to_handwriting_image(response.text)
+            
+            # Send Image
             await update.message.reply_photo(photo=img_bytes, caption=f"Ye le solution! @{user_name}")
             await waiting_msg.delete()
 
         except Exception as e:
-            # Agar ab bhi error aaye, to exact error print karo logs me
-            logging.error(f"GEMINI ERROR: {e}")
-            
-            # User ko batao ki shayad image issue hai
-            await waiting_msg.edit_text(
-                "Yaar AI ko ye photo samajh nahi aayi. 😕\n"
-                "Try karo:\n"
-                "1. Photo thodi crop karke bhejo (sirf question dikhe).\n"
-                "2. Ya question text mein likh do."
-            )
-    
-    # ... (Chat logic same rahega) ...
+            logging.error(f"Error: {e}")
+            await waiting_msg.edit_text("⚠️ Yaar ye sawal samajh nahi aa raha. Thodi saaf photo bhejo. (Technical Error)")
 
-# --- 7. MAIN ---
+    else:
+        # --- CHAT MODE ---
+        try:
+            chat_prompt = (
+                f"You are a friendly JEE aspirant. User said: '{user_msg}'. "
+                "Reply in short, casual Hinglish slang. Be funny. Max 1 sentence."
+            )
+            response = model.generate_content(chat_prompt)
+            await update.message.reply_text(response.text)
+        except:
+            pass 
+
+# --- 7. START APP ---
 if __name__ == '__main__':
-    # Server start (Background)
+    # Start Flask Server
     t = Thread(target=run_http)
     t.start()
     
-    # Bot start
     if not TELEGRAM_TOKEN:
-        print("❌ Error: TELEGRAM_TOKEN missing.")
+        print("❌ TELEGRAM_TOKEN nahi mila.")
     else:
         app_bot = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
         app_bot.add_handler(CommandHandler('start', start))
         app_bot.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, solve_doubt))
         
         print("✅ Bot is running...")
-        app_bot.run_polling()
+        app_bot.run_polling(drop_pending_updates=True) 
+        # 'drop_pending_updates=True' se conflict kam hote hain
