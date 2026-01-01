@@ -24,7 +24,7 @@ logging.basicConfig(
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
     # Model name fix: 'gemini-1.5-flash-latest' sabse stable hai abhi
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    model = genai.GenerativeModel('gemini-2.0-flash')
 else:
     logging.error("⚠️ GOOGLE_API_KEY Missing! Render settings check karo.")
 
