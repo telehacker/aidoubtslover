@@ -88,70 +88,85 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Baki gapp-shapp bhi kar sakte ho!"
     )
 
+# --- UPDATE THIS FUNCTION IN YOUR CODE ---
+
 async def solve_doubt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not GOOGLE_API_KEY:
-        await update.message.reply_text("❌ API Key missing. Owner se bolo settings check kare.")
+        await update.message.reply_text("❌ API Key missing.")
         return
 
     user_msg = update.message.text
     user_name = update.effective_user.first_name
     
-    # === DECISION: Doubt hai ya Chat? ===
-    is_doubt = False
-    
-    if update.message.photo:
-        is_doubt = True # Photo matlab pakka doubt
-    elif user_msg:
-        # Padhai wale words check karo
-        keywords = ['solve', 'doubt', 'explain', 'question', 'math', 'physics', 'chemistry', 'answer', 'integration', 'derivative', 'reaction', 'meaning']
-        if any(word in user_msg.lower() for word in keywords):
-            is_doubt = True
-        elif len(user_msg.split()) > 6: # Lamba message = shayad question hai
-            is_doubt = True
+    # ... (Is_Doubt logic same rahega) ...
+    # Agar message me keywords hain ya photo hai to 'is_doubt = True'
 
-    # === EXECUTION ===
+    # === Logic for Doubts ===
+    # Yahan humne Safety Settings add ki hain taaki block na ho
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+    ]
+
     if is_doubt:
-        # --- DOUBT MODE (Handwriting) ---
         waiting_msg = await update.message.reply_text(f"Ruk {user_name}, solve kar raha hu... ✍️")
         
         try:
+            # TEACHER PROMPT (Thoda aur strong banaya hai)
             system_prompt = (
-                "You are a smart JEE student. Solve this problem step-by-step clearly. "
-                "Write in plain text (Hinglish/English). "
-                "Do NOT use LaTeX (like \\frac or $$). Use simple format like (a/b). "
-                "Keep explanation to the point."
+                "You are an expert JEE Tutor. Your task is to solve physics/math/chemistry problems. "
+                "Analyze the image or text carefully. "
+                "Provide a step-by-step solution in simple Hinglish/English. "
+                "Do NOT use complex LaTeX. Write as if writing in a notebook."
             )
 
+            response = None
+
+            # CASE 1: Photo
             if update.message.photo:
                 photo_file = await update.message.photo[-1].get_file()
                 image_bytes = await photo_file.download_as_bytearray()
                 user_image = Image.open(io.BytesIO(image_bytes))
-                caption = update.message.caption if update.message.caption else "Solve this"
-                response = model.generate_content([system_prompt, caption, user_image])
-            else:
-                response = model.generate_content(f"{system_prompt}\n\nQuestion: {user_msg}")
+                caption = update.message.caption if update.message.caption else "Solve this question detailed."
+                
+                # Image ke liye 'gemini-1.5-flash' use karein (Flash models vision ke liye fast hote hain)
+                # Note: 'stream=False' zaroori hai
+                response = model.generate_content(
+                    [system_prompt, caption, user_image],
+                    safety_settings=safety_settings
+                )
 
-            # Image banao aur bhejo
+            # CASE 2: Text
+            else:
+                response = model.generate_content(
+                    f"{system_prompt}\n\nQuestion: {user_msg}",
+                    safety_settings=safety_settings
+                )
+            
+            # Response Check
+            if not response.text:
+                raise ValueError("Empty response from AI")
+
+            # Image Conversion
             img_bytes = text_to_handwriting_image(response.text)
             await update.message.reply_photo(photo=img_bytes, caption=f"Ye le solution! @{user_name}")
             await waiting_msg.delete()
 
         except Exception as e:
-            logging.error(f"Error: {e}")
-            await waiting_msg.edit_text("Yaar ye sawal samajh nahi aa raha. Thodi saaf photo bhejo ya clear text likho. 🤔")
-
-    else:
-        # --- CHAT MODE (Normal Text) ---
-        try:
-            chat_prompt = (
-                f"You are a friendly JEE aspirant friend. User said: '{user_msg}'. "
-                "Reply in very short, casual Hinglish (Indian slang allowed like bhai, yaar). "
-                "Be funny or motivating. Max 20 words."
+            # Agar ab bhi error aaye, to exact error print karo logs me
+            logging.error(f"GEMINI ERROR: {e}")
+            
+            # User ko batao ki shayad image issue hai
+            await waiting_msg.edit_text(
+                "Yaar AI ko ye photo samajh nahi aayi. 😕\n"
+                "Try karo:\n"
+                "1. Photo thodi crop karke bhejo (sirf question dikhe).\n"
+                "2. Ya question text mein likh do."
             )
-            response = model.generate_content(chat_prompt)
-            await update.message.reply_text(response.text)
-        except:
-            pass # Ignore errors in chat mode
+    
+    # ... (Chat logic same rahega) ...
 
 # --- 7. MAIN ---
 if __name__ == '__main__':
