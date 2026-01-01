@@ -22,7 +22,7 @@ logging.basicConfig(
 # --- 3. GEMINI AI SETUP ---
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-flash-latest')
 else:
     logging.error("⚠️ GOOGLE_API_KEY nahi mila! Render Environment Variables check karein.")
 
