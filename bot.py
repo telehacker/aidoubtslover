@@ -9,7 +9,7 @@ from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, Messa
 import google.generativeai as genai
 from PIL import Image, ImageDraw, ImageFont
 
-# --- 1. CONFIGURATION (Environment Variables se uthayega) ---
+# --- 1. CONFIGURATION ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
@@ -22,11 +22,12 @@ logging.basicConfig(
 # --- 3. GEMINI AI SETUP ---
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
+    # Model name updated to avoid 404 error
     model = genai.GenerativeModel('gemini-1.5-flash-latest')
 else:
     logging.error("⚠️ GOOGLE_API_KEY nahi mila! Render Environment Variables check karein.")
 
-# --- 4. FLASK SERVER (Render ko zinda rakhne ke liye) ---
+# --- 4. FLASK SERVER (For Render Keep-Alive) ---
 app = Flask('')
 
 @app.route('/')
@@ -35,134 +36,136 @@ def home():
 
 def run_http():
     port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+    try:
+        app.run(host='0.0.0.0', port=port)
+    except:
+        pass
 
-# --- 5. HANDWRITING GENERATOR FUNCTION ---
+# --- 5. HANDWRITING GENERATOR ---
 def text_to_handwriting_image(text):
-    # Setup Page
     width = 1000
     font_size = 40
     line_spacing = 10
     margin = 50
     
-    # Font Load (GitHub par 'handwriting.ttf' hona zaroori hai)
     try:
         font = ImageFont.truetype("handwriting.ttf", font_size)
     except IOError:
         font = ImageFont.load_default()
-        logging.warning("⚠️ 'handwriting.ttf' nahi mila. Default font use ho raha hai.")
-
-    # Text Wrapping
+    
+    # Calculate layout
     chars_per_line = int((width - 2 * margin) / (font_size * 0.6))
     wrapper = textwrap.TextWrapper(width=chars_per_line)
     
     lines = []
     for paragraph in text.split('\n'):
         lines.extend(wrapper.wrap(paragraph))
-        lines.append('') # Paragraph gap
+        lines.append('') 
 
-    # Height Calculation
     total_text_height = len(lines) * (font_size + line_spacing)
     height = max(1000, total_text_height + 2 * margin)
 
-    # Create Image (White Paper)
+    # Create Image
     image = Image.new('RGB', (width, height), color=(255, 255, 255))
     draw = ImageDraw.Draw(image)
-
-    # Draw Text (Blue Ink Color)
     y_text = margin
-    text_color = (0, 0, 150)
+    text_color = (0, 0, 150) # Blue Ink
 
     for line in lines:
         draw.text((margin, y_text), line, font=font, fill=text_color)
         y_text += font_size + line_spacing
 
-    # Save to Memory
     bio = io.BytesIO()
     image.save(bio, 'JPEG', quality=85)
     bio.seek(0)
     return bio
 
-# --- 6. BOT COMMANDS ---
+# --- 6. BOT LOGIC ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user.first_name
     await update.message.reply_text(
-        f"👋 Hello {user}!\n\n"
-        "Main JEE Doubt Solver hu. 🤖\n"
-        "Mujhe question ki photo bhejo ya text likho.\n"
-        "Main handwritten format mein solution dunga!"
+        "👋 Aur Bhai! JEE ki taiyari kaisi chal rahi hai?\n"
+        "Mujhe koi bhi question bhejo (Photo ya Text), main solve karke dunga.\n"
+        "Baki gapp-shapp bhi kar sakte ho!"
     )
 
 async def solve_doubt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not GOOGLE_API_KEY:
-        await update.message.reply_text("⚠️ Server Error: API Key missing.")
+        await update.message.reply_text("❌ API Key missing. Owner se bolo settings check kare.")
         return
 
+    user_msg = update.message.text
     user_name = update.effective_user.first_name
-    waiting_msg = await update.message.reply_text(f"⏳ Soch raha hu {user_name}... (Processing)")
+    
+    # === DECISION: Doubt hai ya Chat? ===
+    is_doubt = False
+    
+    if update.message.photo:
+        is_doubt = True # Photo matlab pakka doubt
+    elif user_msg:
+        # Padhai wale words check karo
+        keywords = ['solve', 'doubt', 'explain', 'question', 'math', 'physics', 'chemistry', 'answer', 'integration', 'derivative', 'reaction', 'meaning']
+        if any(word in user_msg.lower() for word in keywords):
+            is_doubt = True
+        elif len(user_msg.split()) > 6: # Lamba message = shayad question hai
+            is_doubt = True
 
-    try:
-        # Prompt Engineering for simple text output (LaTeX avoid karein)
-        system_instruction = (
-            "You are a JEE expert. Solve this problem step-by-step. "
-            "IMPORTANT: Do not use complex LaTeX or Markdown formatting. "
-            "Write in plain text as if writing in a notebook. "
-            "Use words like 'integral' instead of symbols if possible. Keep it clean."
-        )
-
-        response_text = ""
-
-        # CASE 1: Photo Input
-        if update.message.photo:
-            photo_file = await update.message.photo[-1].get_file()
-            image_bytes = await photo_file.download_as_bytearray()
-            user_image = Image.open(io.BytesIO(image_bytes))
-            
-            caption = update.message.caption if update.message.caption else "Solve this."
-            full_prompt = [system_instruction, caption, user_image]
-            
-            response = model.generate_content(full_prompt)
-            response_text = response.text
-
-        # CASE 2: Text Input
-        elif update.message.text:
-            full_prompt = f"{system_instruction}\n\nQuestion: {update.message.text}"
-            response = model.generate_content(full_prompt)
-            response_text = response.text
+    # === EXECUTION ===
+    if is_doubt:
+        # --- DOUBT MODE (Handwriting) ---
+        waiting_msg = await update.message.reply_text(f"Ruk {user_name}, solve kar raha hu... ✍️")
         
-        else:
-            await waiting_msg.edit_text("❌ Please photo ya text bhejein.")
-            return
+        try:
+            system_prompt = (
+                "You are a smart JEE student. Solve this problem step-by-step clearly. "
+                "Write in plain text (Hinglish/English). "
+                "Do NOT use LaTeX (like \\frac or $$). Use simple format like (a/b). "
+                "Keep explanation to the point."
+            )
 
-        # Convert AI Text to Handwriting Image
-        img_bytes = text_to_handwriting_image(response_text)
-        
-        # Send Photo back to user
-        await update.message.reply_photo(
-            photo=img_bytes,
-            caption=f"📝 Solution for {user_name}"
-        )
-        
-        # Purana 'waiting' message delete karein
-        await waiting_msg.delete()
+            if update.message.photo:
+                photo_file = await update.message.photo[-1].get_file()
+                image_bytes = await photo_file.download_as_bytearray()
+                user_image = Image.open(io.BytesIO(image_bytes))
+                caption = update.message.caption if update.message.caption else "Solve this"
+                response = model.generate_content([system_prompt, caption, user_image])
+            else:
+                response = model.generate_content(f"{system_prompt}\n\nQuestion: {user_msg}")
 
-    except Exception as e:
-        logging.error(f"Error: {e}")
-        await waiting_msg.edit_text("⚠️ Error aa gaya. Shayad question samajh nahi aaya. Dubara try karein.")
+            # Image banao aur bhejo
+            img_bytes = text_to_handwriting_image(response.text)
+            await update.message.reply_photo(photo=img_bytes, caption=f"Ye le solution! @{user_name}")
+            await waiting_msg.delete()
 
-# --- 7. MAIN EXECUTION ---
+        except Exception as e:
+            logging.error(f"Error: {e}")
+            await waiting_msg.edit_text("Yaar ye sawal samajh nahi aa raha. Thodi saaf photo bhejo ya clear text likho. 🤔")
+
+    else:
+        # --- CHAT MODE (Normal Text) ---
+        try:
+            chat_prompt = (
+                f"You are a friendly JEE aspirant friend. User said: '{user_msg}'. "
+                "Reply in very short, casual Hinglish (Indian slang allowed like bhai, yaar). "
+                "Be funny or motivating. Max 20 words."
+            )
+            response = model.generate_content(chat_prompt)
+            await update.message.reply_text(response.text)
+        except:
+            pass # Ignore errors in chat mode
+
+# --- 7. MAIN ---
 if __name__ == '__main__':
-    # Flask Server start karein (Background thread)
+    # Server start (Background)
     t = Thread(target=run_http)
     t.start()
     
-    # Bot start karein
+    # Bot start
     if not TELEGRAM_TOKEN:
-        print("❌ Error: TELEGRAM_TOKEN nahi mila. Environment Variables check karein.")
+        print("❌ Error: TELEGRAM_TOKEN missing.")
     else:
-        application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-        application.add_handler(CommandHandler('start', start))
-        application.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, solve_doubt))
+        app_bot = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+        app_bot.add_handler(CommandHandler('start', start))
+        app_bot.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, solve_doubt))
         
         print("✅ Bot is running...")
-        application.run_polling()
+        app_bot.run_polling()
